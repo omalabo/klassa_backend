@@ -25,7 +25,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path('api/', include('sabil.urls')),  # ← ton app avec views.py/urls.py
+    path('api/', include('schooldjango.urls')),  # ← ton app avec views.py/urls.py
 ]
 
 if settings.DEBUG:
