@@ -29,10 +29,10 @@ DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 # Autoriser les domaines de production (séparés par des virgules dans l'env)
 
-#allowed_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,57.131.134.241')
+#allowed_hosts = os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,57.129.5.4')
 #ALLOWED_HOSTS = allowed_hosts.split(',') if allowed_hosts else ['localhost', '127.0.0.1']
 
-ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,57.131.134.241,https://app.sabil-al-ilm.org,https://api.sabil-al-ilm.org').split(',')
+ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,57.129.5.4,https://myklassa.org,https://api.myklassa.org').split(',')
 
 
 # Application definition
@@ -45,7 +45,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
-    'sabil',
+    'schooldjango',
     'channels',
 ]
 
@@ -55,10 +55,10 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            # En prod, Coolify injectera REDIS_HOST='sabil-redis'
+            # En prod, Coolify injectera REDIS_HOST='klassa-redis'
             #"hosts": [(os.environ.get('REDIS_HOST', '127.0.0.1'), int(os.environ.get('REDIS_PORT', 6379)))],
             #"hosts": [os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")],
-            "hosts": [os.environ.get("REDIS_URL", "redis://default:SN8ru51Lm4T0p8YM3LxHvtoLlmAMWXfZThj1kC01GnplRwzmlx92c1pNHxvAPbx4@wyus0upsk4oam8hdk440d7sj:6379/0")],
+            "hosts": [os.environ.get("REDIS_URL", "redis://default:tT41SRbQqONPqlFeXXyxRkoFNwIgmRWPkdcJ4WYOQTYPN0po15hcEW9z1vHY3OpK@sudyv6mubgti6szckhgfof97:6379/0")],
         },
     },
 }
@@ -88,13 +88,13 @@ MIDDLEWARE = [
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'True') == 'True'
 
 # On définit les origines autorisées via variable d'environnement (séparées par des virgules)
-cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://app.sabil-al-ilm.org,http://localhost:3000,http://localhost:8000,http://57.131.134.241:8001')
+cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS', 'https://myklassa.org,http://localhost:3000,http://localhost:8000,http://57.131.134.241:8001')
 CORS_ALLOWED_ORIGINS = cors_origins.split(',') if cors_origins else []
 CORS_ALLOW_CREDENTIALS = True
 # 3. Origines de confiance pour les requêtes POST/PUT (CSRF) avec HTTPS
 csrf_origins = os.environ.get(
     'CSRF_TRUSTED_ORIGINS', 
-    'https://app.sabil-al-ilm.org,https://api.sabil-al-ilm.org'
+    'https://myklassa.org,https://api.myklassa.org'
 )
 CSRF_TRUSTED_ORIGINS = csrf_origins.split(',') if csrf_origins else []
 
@@ -127,10 +127,10 @@ WSGI_APPLICATION = 'pubproject.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('POSTGRES_DB', 'sabil-db'),
-        'USER': os.environ.get('POSTGRES_USER', 'sabil_user'),
+        'NAME': os.environ.get('POSTGRES_DB', 'klassa-db'),
+        'USER': os.environ.get('POSTGRES_USER', 'klassa_user'),
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'Roum@ou94'),
-        'HOST': os.environ.get('POSTGRES_HOST', 'sabil-db'), # En prod, ce sera 'sabil-db'
+        'HOST': os.environ.get('POSTGRES_HOST', 'klassa-db'), # En prod, ce sera 'sabil-db'
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
