@@ -226,7 +226,7 @@ SIMPLE_JWT = {
 }
 
 # Custom User Model (car tu utilises 'Users' au lieu de Django User)
-AUTH_USER_MODEL = 'sabil.Users'  # ← Remplace 'sabil' par le nom de ton app si différent
+AUTH_USER_MODEL = 'schooldjango.Users'  # ← Remplace 'sabil' par le nom de ton app si différent
 
 # Timezone Maroc/Afrique (ajuste si besoin)
 TIME_ZONE = 'Africa/Casablanca'
