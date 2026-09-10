@@ -211,16 +211,38 @@ class Diplomes(models.Model):
         db_table = 'diplomes'
 
 
+
 class Enregistrements(models.Model):
-    id = models.UUIDField(primary_key=True)
-    classe = models.ForeignKey(Classes, models.DO_NOTHING)
-    seance = models.ForeignKey('Seances', models.DO_NOTHING, blank=True, null=True)
-    demarre_par = models.ForeignKey('Users', models.DO_NOTHING, db_column='demarre_par')
+    id = models.UUIDField(primary_key=True,default=uuid.uuid4)
+    classe = models.ForeignKey(
+        Classes, 
+        models.DO_NOTHING,
+        related_name='enregistrements_video'  # ← ÉVITE le conflit
+    )
+    seance = models.ForeignKey(
+        'Seances', 
+        models.DO_NOTHING, 
+        blank=True, 
+        null=True,
+        related_name='enregistrements_video'  # ← ÉVITE le conflit
+    )
+    demarre_par = models.ForeignKey(
+        'Users', 
+        models.DO_NOTHING, 
+        db_column='demarre_par',
+        related_name='enregistrements_demarres'  # ← ÉVITE le conflit
+    )
+    egress_id = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True, 
+        unique=True
+    )  # ← NOUVEAU
     url_video = models.TextField(blank=True, null=True)
     duree_secondes = models.IntegerField(blank=True, null=True)
     taille_bytes = models.BigIntegerField(blank=True, null=True)
-    statut = models.TextField()  # This field type is a guess.
-    started_at = models.DateTimeField()
+    statut = models.TextField()
+    started_at = models.DateTimeField(auto_now_add=True)
     ended_at = models.DateTimeField(blank=True, null=True)
     deleted_at = models.DateTimeField(blank=True, null=True)
 
@@ -228,6 +250,10 @@ class Enregistrements(models.Model):
         managed = False
         db_table = 'enregistrements'
         db_table_comment = 'Seuls prof / admin / direction peuvent lancer un enregistrement. Élèves informés par message système.'
+
+    def __str__(self):
+        return f"Enregistrement {self.classe_id} - {self.started_at.strftime('%Y-%m-%d %H:%M')}"
+        
 
 
 class Factures(models.Model):
@@ -262,7 +288,7 @@ class Factures(models.Model):
 
 
 class Fichiers(models.Model):
-    id = models.UUIDField(primary_key=True)
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     uploade_par = models.ForeignKey('Users', models.DO_NOTHING, db_column='uploade_par')
     classe = models.ForeignKey(Classes, models.DO_NOTHING, blank=True, null=True)
     nom_original = models.CharField(max_length=255)
@@ -271,7 +297,7 @@ class Fichiers(models.Model):
     type_fichier = models.TextField()  # This field type is a guess.
     mime_type = models.CharField(max_length=100, blank=True, null=True)
     taille_bytes = models.BigIntegerField(blank=True, null=True)
-    created_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
     fichier_expires_at = models.DateTimeField(null=True, blank=True)
     is_voice_note = models.BooleanField(default=False)
 
@@ -373,7 +399,7 @@ class LogsActivite(models.Model):
 
 
 class Messages(models.Model):
-    id = models.UUIDField(primary_key=True)
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     expediteur = models.ForeignKey('Users', models.DO_NOTHING)
     classe = models.ForeignKey(Classes, models.DO_NOTHING)
     TYPE_CANAL_CHOICES = [
@@ -403,7 +429,7 @@ class Messages(models.Model):
     fichier = models.ForeignKey(Fichiers, models.DO_NOTHING, blank=True, null=True)
     is_systeme = models.BooleanField()
     reply_to = models.ForeignKey('self', models.DO_NOTHING, db_column='reply_to', blank=True, null=True)
-    created_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
     deleted_at = models.DateTimeField(blank=True, null=True)
     recu_par = models.JSONField(default=list)   # liste d'user_ids qui ont reçu
     lu_par_ids = models.JSONField(default=list) # liste d'user_ids qui ont lu
@@ -412,6 +438,7 @@ class Messages(models.Model):
         managed = False
         db_table = 'messages'
         db_table_comment = 'Chat de groupe et canaux spéciaux. Historique complet conservé même pour les nouveaux membres.'
+
 
 
 class MessagesPrives(models.Model):
