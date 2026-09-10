@@ -64,7 +64,7 @@ from django.shortcuts import get_object_or_404
 from django.core.files.base import ContentFile
 from django.views.decorators.csrf import csrf_exempt
 from livekit.api import TokenVerifier, WebhookReceiver
-from sabil.authentication import LiveKitWebhookAuthentication
+from schooldjango.authentication import LiveKitWebhookAuthentication
 from rest_framework.permissions import AllowAny
 
 # ... (tes constantes LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
@@ -400,7 +400,7 @@ def livekit_webhook(request):
                             print(f"🚀 Tentative de fusion vers le processor: {output_filename}")
                             
                             resp = requests.post(
-                                "https://processor.sabil-al-ilm.org/merge", # 🔴 URL CORRECTE AVEC /merge
+                                "https://processor.myklassa.org/merge", # 🔴 URL CORRECTE AVEC /merge
                                 json={
                                     "audio_filename": audio_filename,
                                     "total_duration": total_duration,
@@ -411,7 +411,7 @@ def livekit_webhook(request):
                             )
                             
                             if resp.status_code == 200:
-                                public_url = f"https://recordings.sabil-al-ilm.org/{output_filename}"
+                                public_url = f"https://recordings.myklassa.org/{output_filename}"
                                 expediteur = classe.professeur or Users.objects.filter(is_staff=True).first()
 
                                 # 1. Sauvegarder l'enregistrement fusionné en BDD
@@ -1878,7 +1878,7 @@ class ForgotPasswordView(APIView):
             )
  
             send_mail(
-                subject="Réinitialisation de votre mot de passe - Sabil Al Ilm",
+                subject="Réinitialisation de votre mot de passe - MyKlassa",
                 message=(
                     f"Bonjour,\n\n"
                     f"Voici votre code de réinitialisation : {code}\n"
