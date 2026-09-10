@@ -55,12 +55,423 @@ from .billing_rules import calculer_tarifs
 
 from schooldjango.authentication import CustomJWTAuthentication  
 
-
- 
 from django.contrib.auth.hashers import make_password, check_password
 from django.core.mail import send_mail
 from rest_framework.throttling import AnonRateThrottle
 import random
+
+from django.shortcuts import get_object_or_404
+from django.core.files.base import ContentFile
+from django.views.decorators.csrf import csrf_exempt
+from livekit.api import TokenVerifier, WebhookReceiver
+from sabil.authentication import LiveKitWebhookAuthentication
+from rest_framework.permissions import AllowAny
+
+# ... (tes constantes LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+
+
+
+
+import asyncio
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def toggle_recording(request, classe_id):
+    classe = get_object_or_404(Classes, id=classe_id)
+    
+    # 1. Récupérer le room_name
+    room_name = request.data.get('room_name')
+    if not room_name:
+        today = timezone.now().date()
+        derniere_presence = Presences.objects.filter(
+            classe=classe, date_seance=today
+        ).order_by('-heure_connexion').first()
+        room_name = derniere_presence.jitsi_room_id if derniere_presence else f"classe_{classe_id}"
+
+    # 2. Si on reçoit des egress_ids → ON LES ARRÊTE. UN POINT C'EST TOUT.
+    egress_ids_to_stop = request.data.get('egress_ids_to_stop', [])
+    if egress_ids_to_stop:
+        async def _stop():
+            lkapi = api.LiveKitAPI(LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+            try:
+                for eid in egress_ids_to_stop:
+                    try:
+                        await lkapi.egress.stop_egress(api.StopEgressRequest(egress_id=eid))
+                    except Exception as err:
+                        print(f"⚠️ Erreur arrêt {eid}: {err}")
+            finally:
+                await lkapi.aclose()
+        
+        try:
+            asyncio.run(_stop())
+            Enregistrements.objects.filter(
+                egress_id__in=egress_ids_to_stop, deleted_at__isnull=True
+            ).update(statut='termine', ended_at=timezone.now())
+            return Response({"status": "stopped", "message": "Enregistrement arrêté."})
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+    # 3. Sinon → ON DÉMARRE UN NOUVEL ENREGISTREMENT. UN POINT C'EST TOUT.
+    async def _start():
+        lkapi = api.LiveKitAPI(LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+        try:
+            # Audio
+            timestamp = int(datetime.now().timestamp())
+            filename = f"audio_{classe.id}_{timestamp}.ogg"
+            req_audio = api.RoomCompositeEgressRequest(
+                room_name=room_name,
+                audio_only=True,
+                file_outputs=[api.EncodedFileOutput(
+                    file_type=api.EncodedFileType.OGG,
+                    filepath=f"/recordings/{filename}",
+                )]
+            )
+            info_audio = await lkapi.egress.start_room_composite_egress(req_audio)
+            resultats = [{"type": "audio", "egress_id": info_audio.egress_id, "filename": filename}]
+
+            # Écrans déjà partagés
+            participants = await lkapi.room.list_participants(api.ListParticipantsRequest(room=room_name))
+            for p in participants.participants:
+                for t in p.tracks:
+                    if t.source == api.TrackSource.SCREEN_SHARE:
+                        ts = int(datetime.now().timestamp())
+                        screen_filename = f"screen_{classe.id}_{ts}.webm"
+                        req_screen = api.TrackEgressRequest(
+                            room_name=room_name,
+                            track_id=t.sid,
+                            file=api.DirectFileOutput(filepath=f"/recordings/{screen_filename}")
+                        )
+                        info_screen = await lkapi.egress.start_track_egress(req_screen)
+                        resultats.append({
+                            "type": "screen",
+                            "egress_id": info_screen.egress_id,
+                            "filename": screen_filename
+                        })
+
+            return resultats
+        finally:
+            await lkapi.aclose()
+
+    try:
+        jobs = asyncio.run(_start())
+    except Exception as e:
+        print(f"❌ Erreur LiveKit Egress: {str(e)}")
+        return Response({"error": "Impossible de démarrer l'enregistrement.", "details": str(e)}, status=500)
+
+    # 4. Sauvegarder en BDD
+    derniere_seance = Seances.objects.filter(classe=classe).order_by('-created_at').first()
+    for job in jobs:
+        Enregistrements.objects.create(
+            classe=classe,
+            seance=derniere_seance,
+            demarre_par=request.user,
+            egress_id=job["egress_id"],
+            url_video=job["filename"],
+            statut='en_cours'
+        )
+    
+    return Response({
+        "status": "started",
+        "jobs": jobs,
+        "message": "Enregistrement démarré."
+    })
+
+
+
+# ──────────────────────────────────────────────────────────────
+# 2. WEBHOOK LIVEKIT (Reçoit la fin de l'enregistrement)
+# ──────────────────────────────────────────────────────────────
+def get_classe_from_room(room_name):
+    presence = Presences.objects.filter(
+        jitsi_room_id=room_name
+    ).order_by('-heure_connexion').first()
+    return presence.classe if presence else None
+
+
+@api_view(['POST'])
+@authentication_classes([LiveKitWebhookAuthentication])
+@permission_classes([AllowAny])
+@csrf_exempt
+def livekit_webhook(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    try:
+        payload = json.loads(request.body)
+        event = payload.get('event')
+        # ═══ AJOUTE CETTE LIGNE ICI, tout de suite après avoir lu event ═══
+        print(f"🔔 WEBHOOK: event={payload.get('event')}, source={payload.get('track', {}).get('source')}")
+
+
+        # ═══════════════════════════════════════════════════════════
+        # 1. Un nouveau partage d'écran démarre → on lance un egress dédié
+        # ═══════════════════════════════════════════════════════════
+        if event == 'track_published':
+            track = payload.get('track', {})
+            participant = payload.get('participant', {})
+            room = payload.get('room', {})
+        
+            is_screen_share = track.get('source') == 'SCREEN_SHARE'
+            room_name = room.get('name')
+            classe = get_classe_from_room(room_name)
+        
+            is_prof = bool(
+                classe and classe.professeur and
+                participant.get('identity') == str(classe.professeur.id)
+            )
+        
+            if is_screen_share and is_prof and classe:
+                #audio_actif = Enregistrements.objects.filter(
+                #    classe=classe, statut='en_cours', url_video__startswith='audio_'
+                #).exists()
+        
+                #if audio_actif:
+                async def _start_screen():
+                    lkapi = api.LiveKitAPI(LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+                    try:
+                        timestamp = int(datetime.now().timestamp())
+                        filename = f"screen_{classe.id}_{timestamp}.webm"
+                        req = api.TrackEgressRequest(
+                            room_name=room_name,
+                            track_id=track.get('sid'),
+                            file=api.DirectFileOutput(filepath=f"/recordings/{filename}")
+                        )
+                        info = await lkapi.egress.start_track_egress(req)
+                        return {"egress_id": info.egress_id, "filename": filename}
+                    finally:
+                        await lkapi.aclose()
+    
+                try:
+                    result = asyncio.run(_start_screen())
+                    derniere_seance = Seances.objects.filter(classe=classe).order_by('-created_at').first()
+                    Enregistrements.objects.create(
+                        classe=classe,
+                        seance=derniere_seance,
+                        demarre_par=classe.professeur,
+                        egress_id=result["egress_id"],
+                        url_video=result["filename"],
+                        statut='en_cours'
+                    )
+                    print(f"✅ Egress écran démarré : {result['filename']}")
+                except Exception as e:
+                    print(f"❌ Impossible de démarrer l'egress écran auto: {str(e)}")
+        
+            return JsonResponse({'status': 'ok'}, status=200)
+
+        # ═══════════════════════════════════════════════════════════
+        # 2. Un partage d'écran s'arrête → on stoppe SON fichier précisément
+        # ═══════════════════════════════════════════════════════════
+        if event == 'track_unpublished':
+            track = payload.get('track', {})
+            room = payload.get('room', {})
+            is_screen_share = track.get('source') == 'SCREEN_SHARE'
+
+            if is_screen_share:
+                room_name = room.get('name')
+                classe = get_classe_from_room(room_name)
+
+                if classe:
+                    enreg_screen = Enregistrements.objects.filter(
+                        classe=classe, statut='en_cours', url_video__startswith='screen_'
+                    ).order_by('-started_at').first()
+
+                    if enreg_screen:
+                        async def _stop_screen():
+                            lkapi = api.LiveKitAPI(LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+                            try:
+                                await lkapi.egress.stop_egress(
+                                    api.StopEgressRequest(egress_id=enreg_screen.egress_id)
+                                )
+                            finally:
+                                await lkapi.aclose()
+
+                        try:
+                            asyncio.run(_stop_screen())
+                        except Exception as e:
+                            print(f"❌ Impossible d'arrêter l'egress écran: {str(e)}")
+
+            return JsonResponse({'status': 'ok'}, status=200)
+
+        # ═══════════════════════════════════════════════════════════
+        # 3. Un fichier (audio OU écran) vient de se terminer
+        # → On sauvegarde juste en BDD, SANS créer de message dans le chat
+        # → Le message final (fusionné) sera créé par 'room_finished'
+        # ═══════════════════════════════════════════════════════════
+        if event == 'egress_ended':
+            egress_info = payload.get('egressInfo') or payload.get('egress') or payload
+            
+            egress_id = egress_info.get('egressId') or egress_info.get('egress_id')
+            
+            duree_ns = egress_info.get('duration')
+            duree = int(float(duree_ns) / 1_000_000_000) if duree_ns else None
+            
+            files_list = egress_info.get('fileResults') or egress_info.get('file_results') or []
+            filename = ""
+            if files_list and len(files_list) > 0:
+                filename = files_list[0].get('filename') or files_list[0].get('location') or ""
+            else:
+                filename = egress_info.get('file', {}).get('filename') or egress_info.get('file', {}).get('location') or ""
+
+            print(f"🎣 WEBHOOK egress_ended traité ! egress_id: {egress_id}, filename: {filename}, duree: {duree}s")
+
+            if not egress_id:
+                return JsonResponse({'status': 'ignored'}, status=200)
+
+            try:
+                enregistrement = Enregistrements.objects.get(egress_id=egress_id, deleted_at__isnull=True)
+            except Enregistrements.DoesNotExist:
+                print(f"⚠️ Aucun enregistrement trouvé en BDD pour egress_id: {egress_id}")
+                return JsonResponse({'status': 'ignored'}, status=200)
+
+            file_name_only = filename.split('/')[-1] if filename else enregistrement.url_video.split('/')[-1]
+
+            # ✅ On garde juste le NOM du fichier (pas l'URL complète)
+            # → ffmpeg a besoin du nom brut pour retrouver le fichier physique
+            enregistrement.url_video = file_name_only
+            enregistrement.statut = 'termine'
+            enregistrement.ended_at = timezone.now()
+            if duree:
+                enregistrement.duree_secondes = duree
+            enregistrement.save()
+
+            print(f"💾 Fichier sauvegardé en BDD (en attente de fusion) : {file_name_only}")
+
+            # ⚠️ PLUS DE création de Message/Fichiers ici — ça se fera uniquement
+            # à la fin du cours, dans le bloc 'room_finished' juste après, avec
+            # la vidéo fusionnée (audio + écran synchronisés).
+
+            return JsonResponse({'status': 'success'}, status=200)
+
+        # ═══════════════════════════════════════════════════════════
+        # 4. Le cours est terminé → on fusionne audio + écran(s) avec ffmpeg
+        # ═══════════════════════════════════════════════════════════
+        if event == 'room_finished':
+            room = payload.get('room', {})
+            room_name = room.get('name')
+            classe = get_classe_from_room(room_name)
+
+            if classe:
+                seance = Seances.objects.filter(classe=classe).order_by('-created_at').first()
+
+                audio = Enregistrements.objects.filter(
+                    classe=classe, seance=seance, statut='termine',
+                    url_video__startswith='audio_'
+                ).order_by('-started_at').first()
+
+                if audio:
+                    screens = list(Enregistrements.objects.filter(
+                        classe=classe, seance=seance, statut='termine',
+                        url_video__startswith='screen_'
+                    ).order_by('started_at'))
+
+                    audio_filename = audio.url_video
+                    audio_start = audio.started_at
+                    audio_end = audio.ended_at or timezone.now()
+                    
+                    # 🔴 CORRECTION 1 : Calculer la durée depuis la BDD si le webhook ne la donne pas
+                    total_duration = audio.duree_secondes
+                    if not total_duration:
+                        total_duration = int((audio_end - audio_start).total_seconds())
+                    
+                    # S'assurer que la durée est > 0 pour que ffmpeg fonctionne
+                    total_duration = max(1, total_duration)
+
+                    segments = []
+                    for s in screens:
+                        if not s.ended_at:
+                            continue
+                        offset = (s.started_at - audio_start).total_seconds()
+                        duration = (s.ended_at - s.started_at).total_seconds()
+                        if offset < 0 or duration <= 0:
+                            continue
+                        segments.append({
+                            "filename": s.url_video,
+                            "start_offset": round(offset, 2),
+                            "duration": round(duration, 2)
+                        })
+
+                    # 🔴 CORRECTION 2 : Lancer la fusion (même s'il n'y a pas d'écran, ça créera une vidéo noir + audio)
+                    if total_duration > 0:
+                        timestamp = int(datetime.now().timestamp())
+                        output_filename = f"merged_{classe.id}_{timestamp}.mp4"
+
+                        try:
+                            import requests
+                            print(f"🚀 Tentative de fusion vers le processor: {output_filename}")
+                            
+                            resp = requests.post(
+                                "https://processor.sabil-al-ilm.org/merge", # 🔴 URL CORRECTE AVEC /merge
+                                json={
+                                    "audio_filename": audio_filename,
+                                    "total_duration": total_duration,
+                                    "segments": segments,
+                                    "output_filename": output_filename
+                                },
+                                timeout=300
+                            )
+                            
+                            if resp.status_code == 200:
+                                public_url = f"https://recordings.sabil-al-ilm.org/{output_filename}"
+                                expediteur = classe.professeur or Users.objects.filter(is_staff=True).first()
+
+                                # 1. Sauvegarder l'enregistrement fusionné en BDD
+                                Enregistrements.objects.create(
+                                    classe=classe, seance=seance,
+                                    demarre_par=classe.professeur,
+                                    egress_id=f"merged_{timestamp}",
+                                    url_video=output_filename,
+                                    statut='termine',
+                                    duree_secondes=int(total_duration)
+                                )
+
+                                nouveau_fichier = Fichiers.objects.create(
+                                    uploade_par=expediteur,
+                                    classe=classe,
+                                    nom_original=f"Replay_{classe.nom}.mp4",
+                                    nom_stockage=output_filename,
+                                    type_fichier='video',
+                                    mime_type='video/mp4',
+                                    is_voice_note=False,
+                                    fichier_local=ContentFile(b"", name=output_filename)
+                                )
+                                
+                                # 2. Créer le message dans le chat
+                                Messages.objects.create(
+                                    expediteur=expediteur,
+                                    classe=classe,
+                                    type_canal='chat_groupe',
+                                    type_message='video',
+                                    contenu=(
+                                        f"🎬 Replay complet du cours disponible\n"
+                                        f"📚 Classe : *{classe.nom}*\n\n"
+                                    ),
+                                    fichier=nouveau_fichier,
+                                    is_systeme=True,
+                                )
+                                print(f"✅ Fusion ffmpeg réussie et message envoyé: {output_filename}")
+                            else:
+                                print(f"❌ Fusion échouée (HTTP {resp.status_code}): {resp.text}")
+                        except Exception as e:
+                            print(f"❌ Erreur critique appel processor: {str(e)}")
+                            import traceback
+                            traceback.print_exc()
+                else:
+                    print(f"⚠️ Pas d'audio trouvé pour fusion, room {room_name}")
+
+            return JsonResponse({'status': 'ok'}, status=200)
+         
+        print(f"⚠️ Événement ignoré (non géré) : {event}")
+        return JsonResponse({'status': 'ignored', 'event': event}, status=200)
+         
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON payload'}, status=400)
+    except Exception as e:
+        print(f"❌ Erreur Webhook LiveKit: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': str(e)}, status=500)
+
+
 # ─────────────────────────────────────────────
 # HELPER : calcul du retard en minutes
 # ─────────────────────────────────────────────
