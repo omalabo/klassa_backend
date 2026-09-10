@@ -73,6 +73,9 @@ router.register(r'taches-direction', views.TacheDirectionViewSet, basename='tach
 
 urlpatterns = [
     # urls.py
+    path('classes/<uuid:classe_id>/toggle-recording/', views.toggle_recording, name='toggle_recording'),
+    path('livekit/webhook/', views.livekit_webhook, name='livekit_webhook'),
+    
     path('mes-diplomes/', views.MyDiplomesView.as_view(), name='my-diplomes'),
     
     path('classes/<uuid:classe_id>/eleves/', views.ElevesByClasseView.as_view(), name='classe-eleves'),
