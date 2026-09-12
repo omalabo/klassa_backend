@@ -706,6 +706,7 @@ class Users(AbstractBaseUser):
     email = models.EmailField(unique=True, max_length=255)
     
     password = models.CharField(max_length=255, db_column='password_hash')
+    expo_push_token = models.CharField(max_length=255, blank=True, null=True, help_text="Token pour les notifications push mobiles")
     
     display_name = models.CharField(max_length=150, blank=True, null=True)
     nom_diplome = models.CharField(max_length=150, blank=True, null=True)
