@@ -1159,6 +1159,19 @@ class PlanningViewSet(viewsets.ModelViewSet):
                 classe=seance.classe,
                 lu=False
             )
+         
+        # ✅ ACTION 2 : Push Notification
+        if direction.expo_push_token:
+            send_expo_push_notification(direction.expo_push_token, "📅 Nouveau créneau", msg, "/direction/planning-global")
+        
+        for inscription in inscriptions:
+            if inscription.eleve.expo_push_token:
+                send_expo_push_notification(
+                    inscription.eleve.expo_push_token, 
+                    "📅 Changement de planning", 
+                    f"Nouveau créneau pour {seance.classe.nom}", 
+                    "/eleve/classes"
+                )
 
 
         return Response({'id': str(seance.id), 'statut': seance.statut}, status=status.HTTP_201_CREATED)
@@ -1294,6 +1307,8 @@ class AbsenceSignalerViewSet(viewsets.ReadOnlyModelViewSet):
         msg = f"Absence signaler pour la classe {seance.classe.nom} a la date du {data['date_absence']}"
         direction = Users.objects.get(role='direction', is_active=True)
         Notifications.objects.create(destinataire=direction, type='absence_prof', titre='absence', contenu=msg, lu=False)
+        if direction.expo_push_token:
+         send_expo_push_notification(direction.expo_push_token, "⚠️ Absence professeur", msg, "/direction/planning-global")
 
         return Response(out.data, status=status.HTTP_201_CREATED)
 
@@ -2214,6 +2229,12 @@ class InscriptionViewSet(viewsets.ModelViewSet):
             lu=False
         )
 
+        if inscription.classe.professeur.expo_push_token:
+            send_expo_push_notification(inscription.classe.professeur.expo_push_token, "🎓 Nouvel élève", msg_prof, "/professeur/cours")
+        if inscription.eleve.expo_push_token:
+            send_expo_push_notification(inscription.eleve.expo_push_token, "🎓 Inscription réussie", msg_eleve, "/eleve/classes")
+         
+
     from rest_framework.exceptions import PermissionDenied
 
     def perform_update(self, serializer):
@@ -2619,6 +2640,35 @@ class MessageViewSet(viewsets.ModelViewSet):
             ]
             
             Notifications.objects.bulk_create(notifications)
+
+            # ✅ ACTION 2 : Push Notifications pour les messages
+            recipients_to_notify = []
+            target_url = "/admin/messages-prives" # Par défaut
+            
+            if self.request.user.role == "direction":
+                recipients_to_notify.append(classe.professeur)
+                target_url = "/professeur/cours"
+                recipients_to_notify.extend([insc.eleve for insc in Inscriptions.objects.filter(classe=classe)])
+                target_url = "/eleve/classes" # Sera écrasé pour les élèves
+            elif self.request.user.role == "eleve":
+                recipients_to_notify.append(direction)
+                recipients_to_notify.append(classe.professeur)
+                target_url = "/direction/classes"
+            else: # admin ou prof
+                recipients_to_notify.append(direction)
+                recipients_to_notify.extend([insc.eleve for insc in Inscriptions.objects.filter(classe=classe)])
+                target_url = "/direction/classes"
+       
+            # Envoi des pushes uniques (pour éviter les doublons si un user est dans la liste 2 fois)
+            unique_recipients = list({r.id: r for r in recipients_to_notify if r.expo_push_token}.values())
+            for recipient in unique_recipients:
+                url_to_open = "/eleve/classes" if recipient.role == 'eleve' else target_url
+                send_expo_push_notification(
+                    recipient.expo_push_token,
+                    f"💬 Nouveau message de {self.request.user.display_name}",
+                    "Ouvrez l'application pour lire le message",
+                    url_to_open
+                )
   
  
 
@@ -4317,7 +4367,17 @@ class FactureEmiseViewSet(viewsets.ModelViewSet):
         direction = Users.objects.get(role='direction', is_active=True)
             
         Notifications.objects.create(destinataire=direction, type='new_facture_soumise', titre='Nouvelle facture soumise', contenu=msg, lu=False)
+
+        # ✅ ACTION 2 : Push Notification
+        if direction.expo_push_token:
+            send_expo_push_notification(direction.expo_push_token, "💰 Nouvelle facture", msg, "/direction/classes")
         
+        # Push pour les élèves concernés (on récupère les destinataires du bulk_create)
+        eleves_concernes = set(item.eleve for item in created if item.eleve.expo_push_token)
+        for eleve in eleves_concernes:
+            send_expo_push_notification(eleve.expo_push_token, "💰 Facture à payer", "Une nouvelle facture a été soumise pour votre classe.", "/eleve/factures")
+
+     
         return Response({
             'detail':     (
                 f'{len(created)} FactureEleve créée(s) '
@@ -4673,6 +4733,12 @@ class FactureEleveViewSet(viewsets.ReadOnlyModelViewSet):
         direction = Users.objects.get(role='direction', is_active=True)
         Notifications.objects.create(destinataire=direction, type='facture_payee', titre='Facture payee', classe=facture_eleve.presence.classe, contenu=msg, lu=False)
 
+        # ✅ ACTION 2 : Push Notification
+        prof = facture_eleve.presence.classe.professeur
+        if prof.expo_push_token:
+            send_expo_push_notification(prof.expo_push_token, "✅ Paiement reçu", msg, "/professeur/cours")
+        if direction.expo_push_token:
+            send_expo_push_notification(direction.expo_push_token, "✅ Paiement reçu", msg, "/direction/classes")
  
         return Response(
             FactureEleveListSerializer(facture_eleve).data,
@@ -4984,6 +5050,11 @@ class TacheDirectionViewSet(viewsets.ModelViewSet):
                 contenu=f"Nouvelle tâche : {tache.titre}",
                 lu=False
             )
+
+            # ✅ ACTION 2 : Push Notification
+            if admin.expo_push_token:
+                send_expo_push_notification(admin.expo_push_token, "📋 Nouvelle tâche", f"Vous avez une nouvelle tâche : {tache.titre}", "/admin/taches")
+             
  
     @action(detail=True, methods=['post'], url_path='marquer-faite')
     def marquer_faite(self, request, pk=None):
@@ -5156,6 +5227,15 @@ class StartSessionView(APIView):
                 created_at=timezone.now(),
             )
 
+            # ✅ ACTION 2 : PUSH NOTIFICATION DIRECTION
+            if direction.expo_push_token:
+                send_expo_push_notification(
+                    direction.expo_push_token,
+                    "🔴 Cours démarré",
+                    f"Salle ouverte pour {classe.nom}",
+                    "/direction/planning-global"
+                )
+
         if user.role == "professeur":
             
             Notifications.objects.create(
@@ -5168,19 +5248,45 @@ class StartSessionView(APIView):
             classe=classe,
             created_at=timezone.now(),)
 
-            inscriptions = Inscriptions.objects.filter(classe=classe)
-            notifications = [
-                Notifications(
-                    destinataire=inscription.eleve,
-                    type='cours_demarrer',
-                    titre='Cours démarré',
-                    classe=seance.classe,
-                    contenu=f'Salle ouverte pour {classe.nom}',
-                    lu=False,
-                    created_at=timezone.now(),
+            # ✅ ACTION 2 : PUSH NOTIFICATION ADMIN
+            admin = Users.objects.filter(id=user.admin_id).first()
+            if admin and admin.expo_push_token:
+                send_expo_push_notification(
+                    admin.expo_push_token,
+                    "🔴 Cours démarré",
+                    f"Salle ouverte pour {classe.nom}",
+                    "/admin/classes"
                 )
-                for inscription in inscriptions
-            ]
+
+     
+        # Notifications pour les élèves
+        inscriptions = Inscriptions.objects.filter(classe=classe)
+        notifications_list = [
+            Notifications(
+                id=uuid.uuid4(),
+                destinataire=inscription.eleve,
+                type='cours_demarrer',
+                titre='Cours démarré',
+                classe=classe, # ✅ Corrigé : on utilise 'classe' et non 'seance.classe'
+                contenu=f'Salle ouverte pour {classe.nom}',
+                lu=False,
+                created_at=timezone.now(),
+            )
+            for inscription in inscriptions
+        ]
+        Notifications.objects.bulk_create(notifications_list)
+     
+
+        # ✅ ACTION 2 : PUSH NOTIFICATIONS ÉLÈVES
+        for inscription in inscriptions:
+            eleve = inscription.eleve
+            if eleve.expo_push_token:
+                send_expo_push_notification(
+                    eleve.expo_push_token,
+                    "🔴 Votre cours commence",
+                    f"La salle pour {classe.nom} est ouverte",
+                    "/eleve/classes"
+                )
 
         # ── 7. Token LiveKit ───────────────────────────────────────────────
         is_moderator = user.role in ('professeur', 'admin', 'direction')
