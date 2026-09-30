@@ -71,7 +71,22 @@ class AnnoncesEleves(models.Model):
         db_table = 'annonces_eleves'
         db_table_comment = 'Annonces pour eleves'
 
+class LivreClasse(models.Model):
+    id = models.UUIDField(primary_key=True)
+    classe = models.ForeignKey(Classes, models.DO_NOTHING)
+    professeur = models.ForeignKey('Users', models.DO_NOTHING, db_column='professeur')
+    titre = models.CharField(max_length=255)
+    fichier_local = models.FileField(upload_to='livres_classe/%Y/%m/')
+    nom_original = models.CharField(max_length=255)
+    type_fichier = models.TextField()  # 'pdf' | 'docx' | 'image'
+    mime_type = models.CharField(max_length=100, blank=True, null=True)
+    taille_bytes = models.BigIntegerField(blank=True, null=True)
+    created_at = models.DateTimeField()
 
+    class Meta:
+        managed = False
+        db_table = 'livres_classe'
+        
 class CatalogueCours(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     nom = models.CharField(max_length=200)
