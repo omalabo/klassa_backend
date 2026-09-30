@@ -71,6 +71,8 @@ router.register(r'admin/prof-facture-presences', views.AdminFacturePresenceViewS
 router.register(r'admin/factures', views.AdminFactureEmiseViewSet, basename='admin-factures')
 router.register(r'taches-direction', views.TacheDirectionViewSet, basename='taches-direction')
 
+router.register(r'livres-classe', views.LivreClasseViewSet, basename='livres-classe')
+
 urlpatterns = [
     # urls.py
     path('classes/<uuid:classe_id>/toggle-recording/', views.toggle_recording, name='toggle_recording'),
