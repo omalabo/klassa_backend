@@ -507,6 +507,7 @@ def send_expo_push_notification(expo_token: str, title: str, body: str, target_u
 
 
 
+
 class LivreClasseViewSet(viewsets.ModelViewSet):
     serializer_class = LivreClasseSerializer
     permission_classes = [IsAuthenticated]
@@ -527,8 +528,22 @@ class LivreClasseViewSet(viewsets.ModelViewSet):
         fichier = self.request.FILES.get('fichier_local')
         if not fichier:
             raise serializers.ValidationError({'fichier_local': 'Fichier requis.'})
+        
         ext = (fichier.name.rsplit('.', 1)[-1] if '.' in fichier.name else '').lower()
-        type_fichier = 'pdf' if ext == 'pdf' else 'docx' if ext in ('doc', 'docx') else 'image'
+        
+        if ext == 'pdf':
+            type_fichier = 'pdf'
+        elif ext in ('doc', 'docx'):
+            type_fichier = 'docx'
+        elif ext in ('ppt', 'pptx'):
+            type_fichier = 'pptx'
+        elif ext in ('png', 'jpg', 'jpeg', 'gif', 'webp'):
+            type_fichier = 'image'
+        else:
+            raise serializers.ValidationError({
+                'fichier_local': f'Format .{ext} non supporté. Utilisez PDF, PPTX, DOCX ou image.'
+            })
+        
         serializer.save(
             id=uuid.uuid4(),
             professeur=self.request.user,
@@ -537,52 +552,34 @@ class LivreClasseViewSet(viewsets.ModelViewSet):
             taille_bytes=fichier.size,
             type_fichier=type_fichier,
             created_at=timezone.now(),
+            fichier_local=fichier,  # 🚨 C'ÉTAIT ÇA LE PROBLÈME ! Ajoute cette ligne.
         )
-
+     
     def perform_destroy(self, instance):
         # Seul le prof qui l'a uploadé (ou admin/direction) peut supprimer
         if instance.professeur_id != self.request.user.id and self.request.user.role not in ('admin', 'direction'):
             raise serializers.ValidationError('Non autorisé.')
         instance.fichier_local.delete(save=False)
         instance.delete()
-     
-
 
 
 class BroadcastConsumer(AsyncWebsocketConsumer):
-    """
-    Consumer générique de rediffusion, utilisé pour :
-      - channel = 'partage'  → qui partage quel onglet (Tableau / Éditeur)
-      - channel = 'editeur'  → contenu du document Tiptap en direct
-    Même mécanisme d'auth et d'accès que TableauConsumer.
-    """
+    CLEAR_EVENTS = {'share_stop', 'end'}
 
     async def connect(self):
-        self.channel_key = self.scope['url_route']['kwargs']['channel']   # 'partage' | 'editeur'
+        # 🆕 Récupérer le channel depuis les kwargs URL
+        self.channel_key = self.scope['url_route']['kwargs']['channel']
         self.classe_id = self.scope['url_route']['kwargs']['classe_id']
         self.seance_id = self.scope['url_route']['kwargs']['seance_id']
-
-        # ── Token depuis l'URL ────────────────────────────────────────
-        query_string = self.scope.get('query_string', b'').decode()
-        token = None
-        for part in query_string.split('&'):
-            if part.startswith('token='):
-                token = part.split('=', 1)[1]
-                break
-
-        if not token:
-            await self.close(code=4001)
-            return
-
+        
+        # Auth
+        token = self.scope['query_string'].decode()
+        token = token.split('token=')[1] if 'token=' in token else None
         self.user = await self.get_user_from_token(token)
-        if not self.user:
-            await self.close(code=4001)
+        if not self.user or not await self.check_access():
+            await self.close()
             return
-
-        if not await self.check_access():
-            await self.close(code=4003)
-            return
-
+        
         self.group_name = f"session_{self.channel_key}_{self.classe_id}_{self.seance_id}"
         self.cache_key = f"session_state_{self.group_name}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
@@ -600,34 +597,23 @@ class BroadcastConsumer(AsyncWebsocketConsumer):
 
         event_type = data.get('type')
 
-        # ── Un client qui vient d'ouvrir l'onglet demande l'état courant ──
         if event_type == 'request_state':
             state = cache.get(self.cache_key)
             if state:
                 await self.send(text_data=json.dumps(state))
             return
 
-        # ── On mémorise le dernier état utile selon le canal ──────────
-        if self.channel_key == 'editeur' and event_type == 'editor_content':
+        if event_type in self.CLEAR_EVENTS:
+            cache.delete(self.cache_key)
+        else:
             cache.set(self.cache_key, data, timeout=60 * 60 * 8)
-
-        elif self.channel_key == 'partage':
-            if event_type == 'share_start':
-                cache.set(self.cache_key, data, timeout=60 * 60 * 8)
-            elif event_type == 'share_stop':
-                cache.delete(self.cache_key)
 
         await self.channel_layer.group_send(
             self.group_name,
-            {
-                'type': 'broadcast_event',
-                'data': data,
-                'sender_channel': self.channel_name,
-            }
+            {'type': 'broadcast_event', 'data': data, 'sender_channel': self.channel_name}
         )
 
     async def broadcast_event(self, event):
-        # On ne renvoie jamais à l'émetteur lui-même
         if event.get('sender_channel') == self.channel_name:
             return
         await self.send(text_data=json.dumps(event['data']))
@@ -666,7 +652,6 @@ class BroadcastConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             print(f"Erreur check_access: {e}")
             return False
-
 
 # ─────────────────────────────────────────────
 # HELPER : calcul du retard en minutes
